@@ -2,7 +2,7 @@
   "name": "nanobanana",
   "version": "0.1.0",
   "type": "module",
-  "description": "AI image generation CLI + MCP server via Google Gemini",
+  "description": "AI image generation CLI via Gemini — full nanobanana plugin support",
   "license": "MIT",
   "bin": {
     "nanobanana": "./bin/nanobanana"
@@ -17,10 +17,6 @@
     "build": "tsup",
     "dev": "tsup --watch",
     "typecheck": "tsc --noEmit"
-  },
-  "dependencies": {
-    "@google/genai": "^1.17.0",
-    "@modelcontextprotocol/sdk": "^1.12.1"
   },
   "devDependencies": {
     "@types/node": "^22.10.5",

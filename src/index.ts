@@ -1,12 +1,21 @@
-export { generate, edit, restore, icon, pattern, story, diagram } from './image-generator.js'
-export type {
-  GenerateOptions,
-  EditOptions,
-  RestoreOptions,
-  IconOptions,
-  PatternOptions,
-  StoryOptions,
-  DiagramOptions,
-} from './types.js'
+export { runGemini, resolveModel, buildPrompt } from './gemini.js'
+export {
+  buildGeneratePrompt,
+  buildEditPrompt,
+  buildRestorePrompt,
+  buildIconPrompt,
+  buildPatternPrompt,
+  buildStoryPrompt,
+  buildDiagramPrompt,
+} from './commands.js'
 export { IMAGE_MODELS, DEFAULT_MODEL } from './types.js'
-export { resolveOutputPath, saveImage, promptToFilename } from './file-handler.js'
+export type {
+  NanobananaOptions,
+  GenerateFlags,
+  IconFlags,
+  PatternFlags,
+  StoryFlags,
+  DiagramFlags,
+  EditFlags,
+  RestoreFlags,
+} from './types.js'

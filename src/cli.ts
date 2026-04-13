@@ -1,28 +1,44 @@
 #!/usr/bin/env node
 
-import { existsSync } from 'node:fs'
-import { resolve } from 'node:path'
-import { generate, edit, restore, icon, pattern, story, diagram } from './image-generator.js'
-import type { IconOptions } from './types.js'
+import { runGemini } from './gemini.js'
+import {
+  buildGeneratePrompt,
+  buildEditPrompt,
+  buildRestorePrompt,
+  buildIconPrompt,
+  buildPatternPrompt,
+  buildStoryPrompt,
+  buildDiagramPrompt,
+} from './commands.js'
 
-function parseFlag(args: string[], flag: string, defaultValue: string): string {
+function parseFlag(args: string[], flag: string): string | undefined {
   const idx = args.indexOf(flag)
-  if (idx === -1) return defaultValue
+  if (idx === -1) return undefined
   const val = args[idx + 1]
   args.splice(idx, 2)
-  return val || defaultValue
+  return val
 }
 
-function parseBoolFlag(args: string[], flag: string): boolean {
-  const idx = args.indexOf(flag)
+function parseBoolFlag(args: string[]): boolean {
+  const idx = args.indexOf('--preview')
   if (idx === -1) return false
   args.splice(idx, 1)
   return true
 }
 
+function removeFlags(args: string[], flags: string[]): void {
+  for (const flag of flags) {
+    const idx = args.indexOf(flag)
+    if (idx !== -1) args.splice(idx, 1)
+  }
+}
+
 function printHelp() {
   console.log(`
-nanobanana - AI image generation via Google Gemini
+nanobanana - AI image generation via Gemini CLI
+
+Wraps the nanobanana Gemini CLI extension with full flag support.
+Auth is handled by Gemini CLI (run \`gemini\` once to authenticate).
 
 USAGE:
   nanobanana "prompt"                              Generate image
@@ -41,6 +57,7 @@ MODELS:
 GLOBAL OPTIONS:
   -o, --output    Save to specific path
   -m, --model     Model alias or full name
+  --no-yolo       Require approval for tool calls
   --preview       Open result in default viewer
 
 GENERATE OPTIONS:
@@ -54,6 +71,7 @@ ICON OPTIONS:
   --size          Icon size: 16, 32, 64, 128, 256, 512, 1024
   --type          app-icon, favicon, ui-element
   --icon-style    flat, skeuomorphic, minimal, modern
+  --img-format    png, jpeg
   --background    transparent, white, black, or color
   --corners       rounded, sharp
 
@@ -68,6 +86,7 @@ PATTERN OPTIONS:
 STORY OPTIONS:
   --steps         Number of frames (2-8, default: 4)
   --type          story, process, tutorial, timeline
+  --story-style   consistent, evolving
   --layout        separate, grid, comic
   --transition    smooth, dramatic, fade
 
@@ -84,17 +103,17 @@ EXAMPLES:
   nanobanana "banana mascot" -n 4 --style watercolor
   nanobanana edit photo.jpg "remove background"
   nanobanana icon "database with lightning" --size 512 --type app-icon
-  nanobanana pattern "geometric waves" --style geometric --colors duotone
+  nanobanana pattern "geometric waves" --pattern-style geometric --colors duotone
   nanobanana story "user onboarding flow" --type tutorial --steps 5
   nanobanana diagram "microservice architecture" --type architecture --layout horizontal
 
-ENVIRONMENT:
-  NANOBANANA_API_KEY   Gemini API key (or GEMINI_API_KEY)
-  Get a key: https://aistudio.google.com/apikey
+PREREQUISITES:
+  npm i -g @google/gemini-cli
+  gemini extensions install https://github.com/gemini-cli-extensions/nanobanana
 `)
 }
 
-async function main() {
+function main() {
   const args = process.argv.slice(2)
 
   if (args.length === 0 || args[0] === 'help' || args[0] === '--help' || args[0] === '-h') {
@@ -102,14 +121,18 @@ async function main() {
     process.exit(0)
   }
 
-  // Global flags (mutate args array)
-  const output = parseFlag(args, '-o', '') || parseFlag(args, '--output', '')
-  const model = parseFlag(args, '-m', '') || parseFlag(args, '--model', '')
-  const preview = parseBoolFlag(args, '--preview')
+  // Global flags
+  const output = parseFlag(args, '-o') || parseFlag(args, '--output')
+  const model = parseFlag(args, '-m') || parseFlag(args, '--model')
+  const noYolo = args.includes('--no-yolo')
+  removeFlags(args, ['--no-yolo'])
+  const preview = parseBoolFlag(args)
 
   const subcommand = args[0]
 
   try {
+    let prompt: string
+
     switch (subcommand) {
       case 'edit': {
         const file = args[1]
@@ -118,18 +141,7 @@ async function main() {
           console.error('Usage: nanobanana edit <image> "instructions"')
           process.exit(1)
         }
-        if (!existsSync(file)) {
-          console.error(`File not found: ${file}`)
-          process.exit(1)
-        }
-        const result = await edit({
-          file: resolve(file),
-          instructions: instructions || 'enhance and improve',
-          output: output || undefined,
-          model: model || undefined,
-          preview,
-        })
-        console.log(result.path)
+        prompt = buildEditPrompt(file, instructions, { preview })
         break
       }
 
@@ -140,155 +152,103 @@ async function main() {
           console.error('Usage: nanobanana restore <image> ["instructions"]')
           process.exit(1)
         }
-        if (!existsSync(file)) {
-          console.error(`File not found: ${file}`)
-          process.exit(1)
-        }
-        const result = await restore({
-          file: resolve(file),
-          instructions,
-          output: output || undefined,
-          model: model || undefined,
-          preview,
-        })
-        console.log(result.path)
+        prompt = buildRestorePrompt(file, instructions, { preview })
         break
       }
 
       case 'icon': {
-        const prompt = args.slice(1).join(' ')
-        if (!prompt) {
+        const desc = args.slice(1).join(' ')
+        if (!desc) {
           console.error('Usage: nanobanana icon "description"')
           process.exit(1)
         }
-        const size = parseFlag(args, '--size', '') as any
-        const type = parseFlag(args, '--type', '') as any
-        const iconStyle = parseFlag(args, '--icon-style', '') as any
-        const background = parseFlag(args, '--background', '') as any
-        const corners = parseFlag(args, '--corners', '') as any
-
-        const result = await icon({
-          prompt,
-          output: output || undefined,
-          model: model || undefined,
-          size: size ? (parseInt(size) as IconOptions['size']) : undefined,
-          type: type || undefined,
-          style: iconStyle || undefined,
-          background: background || undefined,
-          corners: corners || undefined,
+        prompt = buildIconPrompt(desc, {
+          size: parseFlag(args, '--size') ? parseInt(parseFlag(args, '--size')!) : undefined,
+          type: parseFlag(args, '--type'),
+          style: parseFlag(args, '--icon-style'),
+          format: parseFlag(args, '--img-format'),
+          background: parseFlag(args, '--background'),
+          corners: parseFlag(args, '--corners'),
           preview,
         })
-        console.log(result.path)
         break
       }
 
       case 'pattern': {
-        const prompt = args.slice(1).join(' ')
-        if (!prompt) {
+        const desc = args.slice(1).join(' ')
+        if (!desc) {
           console.error('Usage: nanobanana pattern "description"')
           process.exit(1)
         }
-        const size = parseFlag(args, '--size', '')
-        const type = parseFlag(args, '--type', '') as any
-        const patternStyle = parseFlag(args, '--pattern-style', '') as any
-        const density = parseFlag(args, '--density', '') as any
-        const colors = parseFlag(args, '--colors', '') as any
-        const repeat = parseFlag(args, '--repeat', '') as any
-
-        const result = await pattern({
-          prompt,
-          output: output || undefined,
-          model: model || undefined,
-          size: size || undefined,
-          type: type || undefined,
-          style: patternStyle || undefined,
-          density: density || undefined,
-          colors: colors || undefined,
-          repeat: repeat || undefined,
+        prompt = buildPatternPrompt(desc, {
+          size: parseFlag(args, '--size'),
+          type: parseFlag(args, '--type'),
+          style: parseFlag(args, '--pattern-style'),
+          density: parseFlag(args, '--density'),
+          colors: parseFlag(args, '--colors'),
+          repeat: parseFlag(args, '--repeat'),
           preview,
         })
-        console.log(result.path)
         break
       }
 
       case 'story': {
-        const prompt = args.slice(1).join(' ')
-        if (!prompt) {
+        const desc = args.slice(1).join(' ')
+        if (!desc) {
           console.error('Usage: nanobanana story "description"')
           process.exit(1)
         }
-        const steps = parseFlag(args, '--steps', '')
-        const type = parseFlag(args, '--type', '') as any
-        const layout = parseFlag(args, '--layout', '') as any
-        const transition = parseFlag(args, '--transition', '') as any
-
-        const results = await story({
-          prompt,
-          output: output || undefined,
-          model: model || undefined,
-          steps: steps ? parseInt(steps) : undefined,
-          type: type || undefined,
-          layout: layout || undefined,
-          transition: transition || undefined,
+        prompt = buildStoryPrompt(desc, {
+          steps: parseFlag(args, '--steps') ? parseInt(parseFlag(args, '--steps')!) : undefined,
+          type: parseFlag(args, '--type'),
+          style: parseFlag(args, '--story-style'),
+          layout: parseFlag(args, '--layout'),
+          transition: parseFlag(args, '--transition'),
           preview,
         })
-        for (const r of results) console.log(r.path)
         break
       }
 
       case 'diagram': {
-        const prompt = args.slice(1).join(' ')
-        if (!prompt) {
+        const desc = args.slice(1).join(' ')
+        if (!desc) {
           console.error('Usage: nanobanana diagram "description"')
           process.exit(1)
         }
-        const type = parseFlag(args, '--type', '') as any
-        const diagramStyle = parseFlag(args, '--diagram-style', '') as any
-        const layout = parseFlag(args, '--layout', '') as any
-        const complexity = parseFlag(args, '--complexity', '') as any
-        const colors = parseFlag(args, '--colors', '') as any
-        const annotations = parseFlag(args, '--annotations', '') as any
-
-        const result = await diagram({
-          prompt,
-          output: output || undefined,
-          model: model || undefined,
-          type: type || undefined,
-          style: diagramStyle || undefined,
-          layout: layout || undefined,
-          complexity: complexity || undefined,
-          colors: colors || undefined,
-          annotations: annotations || undefined,
+        prompt = buildDiagramPrompt(desc, {
+          type: parseFlag(args, '--type'),
+          style: parseFlag(args, '--diagram-style'),
+          layout: parseFlag(args, '--layout'),
+          complexity: parseFlag(args, '--complexity'),
+          colors: parseFlag(args, '--colors'),
+          annotations: parseFlag(args, '--annotations'),
           preview,
         })
-        console.log(result.path)
         break
       }
 
       default: {
-        // Default: treat everything as a generate prompt
-        const prompt = args.join(' ')
-        const count = parseFlag(args, '-n', '') || parseFlag(args, '--count', '')
-        const style = parseFlag(args, '--style', '')
-        const variations = parseFlag(args, '--variations', '')
-        const format = parseFlag(args, '--format', '') as any
-        const seed = parseFlag(args, '--seed', '')
+        // Default: generate
+        const count = parseFlag(args, '-n') || parseFlag(args, '--count')
+        const style = parseFlag(args, '--style')
+        const variations = parseFlag(args, '--variations')
+        const format = parseFlag(args, '--format')
+        const seed = parseFlag(args, '--seed')
 
-        const results = await generate({
-          prompt,
-          output: output || undefined,
-          model: model || undefined,
+        prompt = buildGeneratePrompt(args.join(' '), {
           count: count ? parseInt(count) : undefined,
           styles: style ? style.split(',') : undefined,
           variations: variations ? variations.split(',') : undefined,
-          format: format || undefined,
+          format,
           seed: seed ? parseInt(seed) : undefined,
           preview,
         })
-        for (const r of results) console.log(r.path)
         break
       }
     }
+
+    const exitCode = runGemini({ prompt, output, model, noYolo })
+    process.exit(exitCode)
   } catch (err: any) {
     console.error(`Error: ${err.message}`)
     process.exit(1)
