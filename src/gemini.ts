@@ -1,22 +1,29 @@
 import { spawnSync } from 'node:child_process'
-import { resolve } from 'node:path'
+import { readFileSync, existsSync } from 'node:fs'
+import { resolve, dirname } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { DEFAULT_MODEL, IMAGE_MODELS, type NanobananaOptions } from './types.js'
 
 /**
- * Check if a command is available in PATH
+ * Load .env from package root if not already in env
  */
-function commandExists(cmd: string): boolean {
-  const result = spawnSync('which', [cmd], { encoding: 'utf-8' })
-  return result.status === 0
-}
+function loadEnv(): void {
+  const pkgRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
+  const envPath = resolve(pkgRoot, '.env')
+  if (!existsSync(envPath)) return
 
-/**
- * Check if nanobanana extension is installed in Gemini CLI
- */
-function extensionInstalled(): boolean {
-  const result = spawnSync('gemini', ['extensions', 'list'], { encoding: 'utf-8' })
-  const output = (result.stdout || '') + (result.stderr || '')
-  return output.includes('nanobanana')
+  const lines = readFileSync(envPath, 'utf-8').split('\n')
+  for (const line of lines) {
+    const trimmed = line.trim()
+    if (!trimmed || trimmed.startsWith('#')) continue
+    const eq = trimmed.indexOf('=')
+    if (eq === -1) continue
+    const key = trimmed.slice(0, eq)
+    const val = trimmed.slice(eq + 1)
+    if (!process.env[key]) {
+      process.env[key] = val
+    }
+  }
 }
 
 /**
@@ -42,17 +49,7 @@ export function buildPrompt(base: string, output?: string): string {
  * Run gemini CLI with nanobanana extension
  */
 export function runGemini(options: NanobananaOptions): number {
-  if (!commandExists('gemini')) {
-    console.error('Gemini CLI not installed. Run: npm i -g @google/gemini-cli')
-    return 1
-  }
-
-  if (!extensionInstalled()) {
-    console.error('nanobanana extension not installed.')
-    console.error('Run: gemini extensions install https://github.com/gemini-cli-extensions/nanobanana')
-    return 1
-  }
-
+  loadEnv()
   const model = resolveModel(options.model)
   const prompt = buildPrompt(options.prompt, options.output)
 
