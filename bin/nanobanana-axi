@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+# Agent ergonomic interface — SessionStart hook for Claude Code
+# Outputs structured context about nanobanana availability
+
+cat <<'EOF'
+description: AI image generation via Gemini CLI (nanobanana extension)
+status: installed
+commands[7]:
+  nanobanana "prompt"                              # Generate image from text
+  nanobanana edit <image> "instructions"           # Edit existing image
+  nanobanana restore <image> ["instructions"]      # Restore old/damaged photo
+  nanobanana icon "description" [options]          # Generate icon (--size, --type, --icon-style, --background, --corners)
+  nanobanana pattern "description" [options]       # Seamless pattern (--size, --type, --pattern-style, --density, --colors, --repeat)
+  nanobanana story "description" [options]         # Image sequence (--steps, --type, --story-style, --layout, --transition)
+  nanobanana diagram "description" [options]       # Technical diagram (--type, --diagram-style, --layout, --complexity, --colors, --annotations)
+models[3]:
+  flash (default) — gemini-3.1-flash-image-preview
+  pro — gemini-3-pro-image-preview
+  v1 — gemini-2.5-flash-image
+global-options: -o <path>, -m <model>, --preview, --no-yolo
+help: Run `nanobanana --help` for full options
+EOF
