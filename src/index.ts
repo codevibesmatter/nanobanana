@@ -1,4 +1,5 @@
-export { runGemini, resolveModel, buildPrompt } from './gemini.js'
+export { callGemini, callGeminiMulti, resolveModel } from './gemini.js'
+export type { GenerateResult } from './gemini.js'
 export {
   buildGeneratePrompt,
   buildEditPrompt,

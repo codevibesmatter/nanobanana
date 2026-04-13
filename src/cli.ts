@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 
-import { runGemini } from './gemini.js'
+import { existsSync } from 'node:fs'
+import { resolve } from 'node:path'
+import { callGemini, callGeminiMulti } from './gemini.js'
 import {
   buildGeneratePrompt,
   buildEditPrompt,
@@ -19,26 +21,18 @@ function parseFlag(args: string[], flag: string): string | undefined {
   return val
 }
 
-function parseBoolFlag(args: string[]): boolean {
-  const idx = args.indexOf('--preview')
+function parseBoolFlag(args: string[], flag: string): boolean {
+  const idx = args.indexOf(flag)
   if (idx === -1) return false
   args.splice(idx, 1)
   return true
 }
 
-function removeFlags(args: string[], flags: string[]): void {
-  for (const flag of flags) {
-    const idx = args.indexOf(flag)
-    if (idx !== -1) args.splice(idx, 1)
-  }
-}
-
 function printHelp() {
   console.log(`
-nanobanana - AI image generation via Gemini CLI
+nanobanana - AI image generation via Google Gemini
 
-Wraps the nanobanana Gemini CLI extension with full flag support.
-Auth is handled by Gemini CLI (run \`gemini\` once to authenticate).
+Direct API — no gemini CLI needed. Just set NANOBANANA_API_KEY or GEMINI_API_KEY.
 
 USAGE:
   nanobanana "prompt"                              Generate image
@@ -57,21 +51,18 @@ MODELS:
 GLOBAL OPTIONS:
   -o, --output    Save to specific path
   -m, --model     Model alias or full name
-  --no-yolo       Require approval for tool calls
   --preview       Open result in default viewer
 
 GENERATE OPTIONS:
   -n, --count     Number of variations (1-8)
   --style         Artistic style(s), comma-separated
   --variations    Variation types: lighting,angle,color-palette,composition,mood,season,time-of-day
-  --format        Output format: grid, separate
   --seed          Seed for reproducible generation
 
 ICON OPTIONS:
   --size          Icon size: 16, 32, 64, 128, 256, 512, 1024
   --type          app-icon, favicon, ui-element
   --icon-style    flat, skeuomorphic, minimal, modern
-  --img-format    png, jpeg
   --background    transparent, white, black, or color
   --corners       rounded, sharp
 
@@ -103,17 +94,23 @@ EXAMPLES:
   nanobanana "banana mascot" -n 4 --style watercolor
   nanobanana edit photo.jpg "remove background"
   nanobanana icon "database with lightning" --size 512 --type app-icon
-  nanobanana pattern "geometric waves" --pattern-style geometric --colors duotone
-  nanobanana story "user onboarding flow" --type tutorial --steps 5
-  nanobanana diagram "microservice architecture" --type architecture --layout horizontal
+  nanobanana diagram "microservice architecture" --type architecture
 
-PREREQUISITES:
-  npm i -g @google/gemini-cli
-  gemini extensions install https://github.com/gemini-cli-extensions/nanobanana
+ENVIRONMENT:
+  NANOBANANA_API_KEY   Gemini API key (or GEMINI_API_KEY)
+  Also reads from .env in package root.
+  Get a key: https://aistudio.google.com/apikey
 `)
 }
 
-function main() {
+async function openPreview(filePath: string): Promise<void> {
+  const { exec } = await import('node:child_process')
+  const { platform } = await import('node:os')
+  const cmd = platform() === 'darwin' ? 'open' : platform() === 'win32' ? 'start' : 'xdg-open'
+  exec(`${cmd} "${filePath}"`)
+}
+
+async function main() {
   const args = process.argv.slice(2)
 
   if (args.length === 0 || args[0] === 'help' || args[0] === '--help' || args[0] === '-h') {
@@ -124,106 +121,102 @@ function main() {
   // Global flags
   const output = parseFlag(args, '-o') || parseFlag(args, '--output')
   const model = parseFlag(args, '-m') || parseFlag(args, '--model')
-  const noYolo = args.includes('--no-yolo')
-  removeFlags(args, ['--no-yolo'])
-  const preview = parseBoolFlag(args)
+  const preview = parseBoolFlag(args, '--preview')
 
   const subcommand = args[0]
 
   try {
-    let prompt: string
+    let results: { path: string; model: string }[]
 
     switch (subcommand) {
       case 'edit': {
         const file = args[1]
         const instructions = args.slice(2).join(' ')
-        if (!file) {
-          console.error('Usage: nanobanana edit <image> "instructions"')
+        if (!file || !existsSync(file)) {
+          console.error(file ? `File not found: ${file}` : 'Usage: nanobanana edit <image> "instructions"')
           process.exit(1)
         }
-        prompt = buildEditPrompt(file, instructions, { preview })
+        const prompt = buildEditPrompt(file, instructions, { preview })
+        results = await callGemini(prompt, { prompt, output, model })
         break
       }
 
       case 'restore': {
         const file = args[1]
-        const instructions = args.slice(2).join(' ') || undefined
-        if (!file) {
-          console.error('Usage: nanobanana restore <image> ["instructions"]')
+        if (!file || !existsSync(file)) {
+          console.error(file ? `File not found: ${file}` : 'Usage: nanobanana restore <image>')
           process.exit(1)
         }
-        prompt = buildRestorePrompt(file, instructions, { preview })
+        const instructions = args.slice(2).join(' ') || undefined
+        const prompt = buildRestorePrompt(file, instructions, { preview })
+        results = await callGemini(prompt, { prompt, output, model })
         break
       }
 
       case 'icon': {
+        const size = parseFlag(args, '--size')
+        const type = parseFlag(args, '--type')
+        const iconStyle = parseFlag(args, '--icon-style')
+        const background = parseFlag(args, '--background')
+        const corners = parseFlag(args, '--corners')
         const desc = args.slice(1).join(' ')
-        if (!desc) {
-          console.error('Usage: nanobanana icon "description"')
-          process.exit(1)
-        }
-        prompt = buildIconPrompt(desc, {
-          size: parseFlag(args, '--size') ? parseInt(parseFlag(args, '--size')!) : undefined,
-          type: parseFlag(args, '--type'),
-          style: parseFlag(args, '--icon-style'),
-          format: parseFlag(args, '--img-format'),
-          background: parseFlag(args, '--background'),
-          corners: parseFlag(args, '--corners'),
-          preview,
+        if (!desc) { console.error('Usage: nanobanana icon "description"'); process.exit(1) }
+        const prompt = buildIconPrompt(desc, {
+          size: size ? parseInt(size) : undefined,
+          type, style: iconStyle, background, corners, preview,
         })
+        results = await callGemini(prompt, { prompt: desc, output, model })
         break
       }
 
       case 'pattern': {
+        const size = parseFlag(args, '--size')
+        const type = parseFlag(args, '--type')
+        const patternStyle = parseFlag(args, '--pattern-style')
+        const density = parseFlag(args, '--density')
+        const colors = parseFlag(args, '--colors')
+        const repeat = parseFlag(args, '--repeat')
         const desc = args.slice(1).join(' ')
-        if (!desc) {
-          console.error('Usage: nanobanana pattern "description"')
-          process.exit(1)
-        }
-        prompt = buildPatternPrompt(desc, {
-          size: parseFlag(args, '--size'),
-          type: parseFlag(args, '--type'),
-          style: parseFlag(args, '--pattern-style'),
-          density: parseFlag(args, '--density'),
-          colors: parseFlag(args, '--colors'),
-          repeat: parseFlag(args, '--repeat'),
-          preview,
+        if (!desc) { console.error('Usage: nanobanana pattern "description"'); process.exit(1) }
+        const prompt = buildPatternPrompt(desc, {
+          size, type, style: patternStyle, density, colors, repeat, preview,
         })
+        results = await callGemini(prompt, { prompt: desc, output, model })
         break
       }
 
       case 'story': {
+        const steps = parseFlag(args, '--steps')
+        const type = parseFlag(args, '--type')
+        const storyStyle = parseFlag(args, '--story-style')
+        const layout = parseFlag(args, '--layout')
+        const transition = parseFlag(args, '--transition')
         const desc = args.slice(1).join(' ')
-        if (!desc) {
-          console.error('Usage: nanobanana story "description"')
-          process.exit(1)
+        if (!desc) { console.error('Usage: nanobanana story "description"'); process.exit(1) }
+        const stepCount = steps ? parseInt(steps) : 4
+        const prompts: string[] = []
+        for (let i = 0; i < stepCount; i++) {
+          prompts.push(buildStoryPrompt(desc, {
+            steps: stepCount, type, style: storyStyle, layout, transition, preview,
+          }) + `\n\nThis is frame ${i + 1} of ${stepCount}.`)
         }
-        prompt = buildStoryPrompt(desc, {
-          steps: parseFlag(args, '--steps') ? parseInt(parseFlag(args, '--steps')!) : undefined,
-          type: parseFlag(args, '--type'),
-          style: parseFlag(args, '--story-style'),
-          layout: parseFlag(args, '--layout'),
-          transition: parseFlag(args, '--transition'),
-          preview,
-        })
+        results = await callGeminiMulti(prompts, { prompt: desc, output, model })
         break
       }
 
       case 'diagram': {
+        const type = parseFlag(args, '--type')
+        const diagramStyle = parseFlag(args, '--diagram-style')
+        const layout = parseFlag(args, '--layout')
+        const complexity = parseFlag(args, '--complexity')
+        const colors = parseFlag(args, '--colors')
+        const annotations = parseFlag(args, '--annotations')
         const desc = args.slice(1).join(' ')
-        if (!desc) {
-          console.error('Usage: nanobanana diagram "description"')
-          process.exit(1)
-        }
-        prompt = buildDiagramPrompt(desc, {
-          type: parseFlag(args, '--type'),
-          style: parseFlag(args, '--diagram-style'),
-          layout: parseFlag(args, '--layout'),
-          complexity: parseFlag(args, '--complexity'),
-          colors: parseFlag(args, '--colors'),
-          annotations: parseFlag(args, '--annotations'),
-          preview,
+        if (!desc) { console.error('Usage: nanobanana diagram "description"'); process.exit(1) }
+        const prompt = buildDiagramPrompt(desc, {
+          type, style: diagramStyle, layout, complexity, colors, annotations, preview,
         })
+        results = await callGemini(prompt, { prompt: desc, output, model })
         break
       }
 
@@ -232,23 +225,37 @@ function main() {
         const count = parseFlag(args, '-n') || parseFlag(args, '--count')
         const style = parseFlag(args, '--style')
         const variations = parseFlag(args, '--variations')
-        const format = parseFlag(args, '--format')
         const seed = parseFlag(args, '--seed')
+        const basePrompt = args.join(' ')
 
-        prompt = buildGeneratePrompt(args.join(' '), {
-          count: count ? parseInt(count) : undefined,
-          styles: style ? style.split(',') : undefined,
-          variations: variations ? variations.split(',') : undefined,
-          format,
-          seed: seed ? parseInt(seed) : undefined,
-          preview,
-        })
+        if (count && parseInt(count) > 1) {
+          const prompts: string[] = []
+          for (let i = 0; i < parseInt(count); i++) {
+            prompts.push(buildGeneratePrompt(basePrompt, {
+              styles: style ? style.split(',') : undefined,
+              variations: variations ? variations.split(',') : undefined,
+              seed: seed ? parseInt(seed) : undefined,
+              preview,
+            }) + `\n\nVariation ${i + 1} of ${count}.`)
+          }
+          results = await callGeminiMulti(prompts, { prompt: basePrompt, output, model })
+        } else {
+          const prompt = buildGeneratePrompt(basePrompt, {
+            styles: style ? style.split(',') : undefined,
+            variations: variations ? variations.split(',') : undefined,
+            seed: seed ? parseInt(seed) : undefined,
+            preview,
+          })
+          results = await callGemini(prompt, { prompt: basePrompt, output, model })
+        }
         break
       }
     }
 
-    const exitCode = runGemini({ prompt, output, model, noYolo })
-    process.exit(exitCode)
+    for (const r of results) {
+      console.log(r.path)
+      if (preview) await openPreview(r.path)
+    }
   } catch (err: any) {
     console.error(`Error: ${err.message}`)
     process.exit(1)

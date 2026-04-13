@@ -1,44 +1,33 @@
-import { spawnSync } from 'node:child_process'
-import { readFileSync, writeFileSync, existsSync } from 'node:fs'
-import { resolve, dirname } from 'node:path'
+import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs'
+import { resolve, dirname, basename, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { DEFAULT_MODEL, IMAGE_MODELS, type NanobananaOptions } from './types.js'
 
-const EXTENSION_ENV = resolve(
-  process.env.HOME || '~',
-  '.gemini/extensions/nanobanana/.env',
-)
+const OUTPUT_DIR = 'nanobanana-output'
 
 /**
- * Ensure the Gemini extension .env has the API key.
- * Reads from our package .env and syncs to the extension.
+ * Load API key from package .env or environment
  */
-function syncApiKey(): void {
-  const pkgRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
-  const pkgEnvPath = resolve(pkgRoot, '.env')
+function getApiKey(): string {
+  // Check env first
+  const envKey = process.env.NANOBANANA_API_KEY || process.env.GEMINI_API_KEY
+  if (envKey) return envKey
 
-  // Read key from our .env
-  let apiKey = process.env.NANOBANANA_API_KEY || process.env.GEMINI_API_KEY
-  if (!apiKey && existsSync(pkgEnvPath)) {
-    const lines = readFileSync(pkgEnvPath, 'utf-8').split('\n')
+  // Fall back to package .env
+  const pkgRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
+  const envPath = resolve(pkgRoot, '.env')
+  if (existsSync(envPath)) {
+    const lines = readFileSync(envPath, 'utf-8').split('\n')
     for (const line of lines) {
       const match = line.match(/^(NANOBANANA_API_KEY|GEMINI_API_KEY)=(.+)/)
-      if (match) {
-        apiKey = match[2]
-        break
-      }
+      if (match) return match[2]
     }
   }
 
-  if (!apiKey) return
-
-  // Sync to extension .env if different or missing
-  if (existsSync(EXTENSION_ENV)) {
-    const current = readFileSync(EXTENSION_ENV, 'utf-8')
-    if (current.includes(apiKey)) return
-  }
-
-  writeFileSync(EXTENSION_ENV, `NANOBANANA_API_KEY=${apiKey}\n`)
+  throw new Error(
+    'No API key found. Set NANOBANANA_API_KEY or GEMINI_API_KEY, or add to .env\n' +
+    'Get a key: https://aistudio.google.com/apikey',
+  )
 }
 
 /**
@@ -50,37 +39,106 @@ export function resolveModel(model?: string): string {
 }
 
 /**
- * Build prompt with optional output path instruction
+ * Sanitize prompt into filename
  */
-export function buildPrompt(base: string, output?: string): string {
-  let prompt = base
-  if (output) {
-    prompt += `\n\nSave the generated image to: ${resolve(output)}`
-  }
-  return prompt
+function promptToFilename(prompt: string, index?: number): string {
+  const base = prompt
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, '')
+    .replace(/\s+/g, '_')
+    .slice(0, 32)
+    .replace(/_+$/, '')
+  const suffix = index !== undefined ? `_${index}` : ''
+  return `${base}${suffix}.png`
 }
 
 /**
- * Run gemini CLI with nanobanana extension
+ * Save base64 image to file, return path
  */
-export function runGemini(options: NanobananaOptions): number {
-  syncApiKey()
+function saveImage(base64: string, outputPath: string): string {
+  const dir = dirname(outputPath)
+  if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
+  writeFileSync(outputPath, Buffer.from(base64, 'base64'))
+  return outputPath
+}
 
-  const model = resolveModel(options.model)
-  const prompt = buildPrompt(options.prompt, options.output)
-
-  const args = ['-m', model, '-p', prompt]
-  if (!options.noYolo) {
-    args.push('--yolo')
+/**
+ * Resolve where to save — explicit path or auto-generated in output dir
+ */
+function resolveOutput(explicit?: string, prompt?: string, index?: number): string {
+  if (explicit) {
+    if (index !== undefined) {
+      const ext = explicit.match(/\.\w+$/)?.[0] || '.png'
+      return explicit.replace(/\.\w+$/, '') + `_${index}${ext}`
+    }
+    return resolve(explicit)
   }
-  args.push('-e', 'nanobanana')
+  if (!existsSync(OUTPUT_DIR)) mkdirSync(OUTPUT_DIR, { recursive: true })
+  return join(OUTPUT_DIR, promptToFilename(prompt || `image_${Date.now()}`, index))
+}
+
+export interface GenerateResult {
+  path: string
+  model: string
+}
+
+/**
+ * Call Gemini API to generate image from prompt
+ */
+export async function callGemini(
+  prompt: string,
+  options: NanobananaOptions,
+): Promise<GenerateResult[]> {
+  const { GoogleGenAI } = await import('@google/genai')
+
+  const apiKey = getApiKey()
+  const client = new GoogleGenAI({ apiKey })
+  const model = resolveModel(options.model)
+  const results: GenerateResult[] = []
 
   console.error(`[nanobanana / ${model}]`)
 
-  const result = spawnSync('gemini', args, {
-    stdio: 'inherit',
-    encoding: 'utf-8',
+  const response = await client.models.generateContent({
+    model,
+    contents: [{ role: 'user', parts: [{ text: prompt }] }],
+    config: { responseModalities: ['image', 'text'] },
   })
 
-  return result.status || 0
+  if (response.candidates?.[0]?.content?.parts) {
+    let imageIndex = 0
+    for (const part of response.candidates[0].content.parts) {
+      const data = (part as any).inlineData?.data
+      if (data && data.length > 1000) {
+        const outputPath = resolveOutput(options.output, options.prompt, results.length > 0 ? imageIndex : undefined)
+        const saved = saveImage(data, outputPath)
+        results.push({ path: saved, model })
+        imageIndex++
+      }
+    }
+  }
+
+  if (results.length === 0) {
+    // Check if there's a text response explaining why
+    const textPart = response.candidates?.[0]?.content?.parts?.find((p: any) => p.text)
+    const msg = (textPart as any)?.text || 'No image returned'
+    throw new Error(msg)
+  }
+
+  return results
+}
+
+/**
+ * Generate multiple variations by calling API multiple times
+ */
+export async function callGeminiMulti(
+  prompts: string[],
+  options: NanobananaOptions,
+): Promise<GenerateResult[]> {
+  const results: GenerateResult[] = []
+  for (let i = 0; i < prompts.length; i++) {
+    const opts = { ...options, output: options.output ? resolveOutput(options.output, options.prompt, i) : undefined }
+    const r = await callGemini(prompts[i], opts)
+    results.push(...r)
+  }
+  return results
 }
