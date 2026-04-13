@@ -1,29 +1,44 @@
 import { spawnSync } from 'node:child_process'
-import { readFileSync, existsSync } from 'node:fs'
+import { readFileSync, writeFileSync, existsSync } from 'node:fs'
 import { resolve, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { DEFAULT_MODEL, IMAGE_MODELS, type NanobananaOptions } from './types.js'
 
-/**
- * Load .env from package root if not already in env
- */
-function loadEnv(): void {
-  const pkgRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
-  const envPath = resolve(pkgRoot, '.env')
-  if (!existsSync(envPath)) return
+const EXTENSION_ENV = resolve(
+  process.env.HOME || '~',
+  '.gemini/extensions/nanobanana/.env',
+)
 
-  const lines = readFileSync(envPath, 'utf-8').split('\n')
-  for (const line of lines) {
-    const trimmed = line.trim()
-    if (!trimmed || trimmed.startsWith('#')) continue
-    const eq = trimmed.indexOf('=')
-    if (eq === -1) continue
-    const key = trimmed.slice(0, eq)
-    const val = trimmed.slice(eq + 1)
-    if (!process.env[key]) {
-      process.env[key] = val
+/**
+ * Ensure the Gemini extension .env has the API key.
+ * Reads from our package .env and syncs to the extension.
+ */
+function syncApiKey(): void {
+  const pkgRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
+  const pkgEnvPath = resolve(pkgRoot, '.env')
+
+  // Read key from our .env
+  let apiKey = process.env.NANOBANANA_API_KEY || process.env.GEMINI_API_KEY
+  if (!apiKey && existsSync(pkgEnvPath)) {
+    const lines = readFileSync(pkgEnvPath, 'utf-8').split('\n')
+    for (const line of lines) {
+      const match = line.match(/^(NANOBANANA_API_KEY|GEMINI_API_KEY)=(.+)/)
+      if (match) {
+        apiKey = match[2]
+        break
+      }
     }
   }
+
+  if (!apiKey) return
+
+  // Sync to extension .env if different or missing
+  if (existsSync(EXTENSION_ENV)) {
+    const current = readFileSync(EXTENSION_ENV, 'utf-8')
+    if (current.includes(apiKey)) return
+  }
+
+  writeFileSync(EXTENSION_ENV, `NANOBANANA_API_KEY=${apiKey}\n`)
 }
 
 /**
@@ -49,7 +64,8 @@ export function buildPrompt(base: string, output?: string): string {
  * Run gemini CLI with nanobanana extension
  */
 export function runGemini(options: NanobananaOptions): number {
-  loadEnv()
+  syncApiKey()
+
   const model = resolveModel(options.model)
   const prompt = buildPrompt(options.prompt, options.output)
 
